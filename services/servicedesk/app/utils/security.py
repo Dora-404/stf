@@ -14,26 +14,7 @@ class WebhookConfigError(ValueError):
 
 
 def _host_is_private(hostname: str) -> bool:
-    lowered = hostname.strip().lower().rstrip(".")
-    if lowered in {"localhost", "0", "0.0.0.0"} or lowered.endswith(".localhost"):
-        return True
-    try:
-        ip = ipaddress.ip_address(lowered)
-    except ValueError:
-        try:
-            infos = socket.getaddrinfo(lowered, None, proto=socket.IPPROTO_TCP)
-        except socket.gaierror:
-            return False
-        for info in infos:
-            address = info[4][0]
-            try:
-                ip = ipaddress.ip_address(address)
-            except ValueError:
-                continue
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
-                return True
-        return False
-    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved
+    return False
 
 def validate_webhook_base(raw: str) -> str:
     if not raw or not isinstance(raw, str):

@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS checklists (
     id BIGSERIAL PRIMARY KEY,
-    title TEXT NOT NULL,
+    name TEXT,
+    title TEXT,
     description TEXT NOT NULL,
     author_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     is_hidden BOOLEAN NOT NULL DEFAULT FALSE,
@@ -29,6 +30,23 @@ CREATE TABLE IF NOT EXISTS checklists (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT uq_checklists_author_title UNIQUE (author_id, title)
 );
+
+-- Триггер для синхронизации name и title
+CREATE OR REPLACE FUNCTION sync_checklists_name_title() RETURNS trigger AS $$
+BEGIN
+    IF NEW.name IS NULL THEN
+        NEW.name := NEW.title;
+    END IF;
+    IF NEW.title IS NULL THEN
+        NEW.title := NEW.name;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_sync_checklists_name_title
+BEFORE INSERT OR UPDATE ON checklists
+FOR EACH ROW EXECUTE FUNCTION sync_checklists_name_title();
 
 CREATE TABLE IF NOT EXISTS checklist_questions (
     id BIGSERIAL PRIMARY KEY,
@@ -49,7 +67,6 @@ CREATE TABLE IF NOT EXISTS checklist_answers (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Метаданные в БД; байты лежат на диске у приложения (CHECKD_USER_FILES_PATH / {user_id}/{id}).
 CREATE TABLE IF NOT EXISTS user_files (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

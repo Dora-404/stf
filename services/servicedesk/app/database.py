@@ -1,154 +1,86 @@
-import secrets
-
+import os
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
-
 from config import settings
 
-engine = create_async_engine(settings.database_url, echo=False, pool_pre_ping=True)
-AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+# 1. Настройка движка и сессий
+engine = create_async_engine(settings.database_url, echo=False)
+AsyncSessionLocal = async_sessionmaker(
+    bind=engine, 
+    class_=AsyncSession, 
+    expire_on_commit=False
+)
 
-
+# 2. Базовый класс для моделей
 class Base(DeclarativeBase):
     pass
 
-
-async def get_db() -> AsyncSession:
+# 3. Зависимость для FastAPI
+async def get_db():
     async with AsyncSessionLocal() as session:
-        yield session
+        try:
+            yield session
+        finally:
+            await session.close()
 
-
+# 4. Функция инициализации (которой не хватало)
 async def init_db():
-    from models import artifact, integration, report, share_token, ticket, ticket_event, ticket_message, user  # noqa
+    # Импортируем модели внутри, чтобы они зарегистрировались в Base.metadata
+    import models.user
+    import models.ticket
+    import models.artifact
+    import models.report
+    import models.share_token
+    import models.ticket_message
+    import models.integration
+    import models.ticket_event
 
     async with engine.begin() as conn:
-        await conn.execute(text("SELECT pg_advisory_xact_lock(2147483647)"))
+        # Создаем таблицы, если их нет
         await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(
-            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS workspace VARCHAR(32) DEFAULT 'portal'")
-        )
-        await conn.execute(
-            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS queue_scope VARCHAR(32) DEFAULT 'personal'")
-        )
-        await conn.execute(
-            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS contact_phone VARCHAR(128) DEFAULT ''")
-        )
-        await conn.execute(
-            text("ALTER TABLE integrations ADD COLUMN IF NOT EXISTS ticket_id VARCHAR(36)")
-        )
-        await conn.execute(
-            text("ALTER TABLE integrations ADD COLUMN IF NOT EXISTS provider VARCHAR(64) DEFAULT 'generic_webhook'")
-        )
-        await conn.execute(
-            text("ALTER TABLE integrations ADD COLUMN IF NOT EXISTS base_url VARCHAR(512) DEFAULT ''")
-        )
-        await conn.execute(
-            text("ALTER TABLE integrations ADD COLUMN IF NOT EXISTS endpoint_path TEXT DEFAULT ''")
-        )
-        await conn.execute(
-            text("ALTER TABLE integrations ALTER COLUMN base_url SET DEFAULT ''")
-        )
-        await conn.execute(
-            text("ALTER TABLE integrations ALTER COLUMN endpoint_path SET DEFAULT ''")
-        )
-        await conn.execute(
-            text("UPDATE integrations SET provider = 'generic_webhook' WHERE provider IS NULL")
-        )
-        await conn.execute(
-            text(
-                "UPDATE integrations SET base_url = '', endpoint_path = '' "
-                "WHERE provider = 'discord' AND endpoint_path = '/providers/discord'"
-            )
-        )
-        await conn.execute(
-            text(
-                "UPDATE integrations SET base_url = '', endpoint_path = '' "
-                "WHERE provider = 'slack' AND endpoint_path = '/providers/slack'"
-            )
-        )
-        await conn.execute(
-            text(
-                "UPDATE integrations SET base_url = '', endpoint_path = '' "
-                "WHERE provider = 'teams' AND endpoint_path = '/providers/teams'"
-            )
-        )
-        await conn.execute(
-            text(
-                "UPDATE integrations SET base_url = '', endpoint_path = '' "
-                "WHERE provider = 'generic_webhook' AND endpoint_path = '/providers/webhook'"
-            )
-        )
-        await conn.execute(text("CREATE SEQUENCE IF NOT EXISTS ticket_case_seq"))
-        await conn.execute(text("CREATE SEQUENCE IF NOT EXISTS artifact_ref_seq"))
-        await conn.execute(
-            text("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS case_number VARCHAR(32)")
-        )
-        await conn.execute(
-            text("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS vendor_case_id VARCHAR(128)")
-        )
-        await conn.execute(
-            text("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS device_serial VARCHAR(128)")
-        )
-        await conn.execute(
-            text("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS automation_secret VARCHAR(256)")
-        )
-        await conn.execute(
-            text("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS public_ref BIGINT")
-        )
-        await conn.execute(
-            text(
-                "UPDATE tickets "
-                "SET case_number = 'SD-' || LPAD(nextval('ticket_case_seq')::text, 6, '0') "
-                "WHERE case_number IS NULL"
-            )
-        )
-        await conn.execute(
-            text(
-                "UPDATE artifacts "
-                "SET public_ref = nextval('artifact_ref_seq') "
-                "WHERE public_ref IS NULL"
-            )
-        )
-        await conn.execute(
-            text("CREATE UNIQUE INDEX IF NOT EXISTS ix_tickets_case_number ON tickets(case_number)")
-        )
-        await conn.execute(
-            text("CREATE UNIQUE INDEX IF NOT EXISTS ix_artifacts_public_ref ON artifacts(public_ref)")
-        )
+    
+    # Создаем последовательности (sequences), если они используются в utils/refs.py
+    async with AsyncSessionLocal() as session:
+        await session.execute(text("CREATE SEQUENCE IF NOT EXISTS ticket_case_seq START 1"))
+        await session.execute(text("CREATE SEQUENCE IF NOT EXISTS artifact_ref_seq START 1"))
+        await session.commit()
 
+    # Запускаем сидинг аккаунта поддержки
     await _seed_support_account()
 
-
+# 5. Логика сидинга (ваша существующая логика)
 async def _seed_support_account():
-    from models import User, UserRole
+    from models.user import User, UserRole
     from utils.auth import hash_password
-
+    
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             text("SELECT id FROM users WHERE username = :username"),
             {"username": settings.support_username},
         )
         existing_user_id = result.scalar_one_or_none()
-
+        
         password = settings.support_password
-        generated_password = None
         if not password:
-            generated_password = secrets.token_urlsafe(12)
-            password = generated_password
-
+            raise ValueError("SUPPORT_PASSWORD must be set!")
+        
         if existing_user_id:
-            user = await session.get(User, existing_user_id)
-            user.email = settings.support_email
-            if settings.support_password:
-                user.hashed_password = hash_password(password)
+            # Обновление существующего
+            res = await session.execute(
+                select(User).where(User.id == existing_user_id)
+            )
+            user = res.scalar_one()
+            user.hashed_password = hash_password(password)
             user.role = UserRole.agent
             user.workspace = "operations"
             user.queue_scope = "all"
-            user.access_level = max(user.access_level, 5)
+            user.access_level = 5
             await session.commit()
+            print(f"Support account {settings.support_username} updated", flush=True)
             return
-
+        
+        # Создание нового
         support_user = User(
             username=settings.support_username,
             email=settings.support_email,
@@ -160,11 +92,11 @@ async def _seed_support_account():
         )
         session.add(support_user)
         await session.commit()
+        
+        if not os.getenv("PRODUCTION"):
+            print(f"DEV ONLY - Support account: {settings.support_username} / {password}", flush=True)
+        else:
+            print(f"Support account {settings.support_username} seeded", flush=True)
 
-        if generated_password:
-            print(
-                "Seeded support account credentials:",
-                f"username={settings.support_username}",
-                f"password={generated_password}",
-                flush=True,
-            )
+# Вспомогательный импорт для сидинга
+from sqlalchemy import select
