@@ -1,0 +1,11 @@
+upstream servicedesk_app {
+    server app:8080;
+}
+
+# limit_req_zone $binary_remote_addr zone=api:10m rate=30r/s;
+
+server {
+    listen 80;
+    server_name _;
+
+    clien
